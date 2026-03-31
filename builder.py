@@ -299,16 +299,20 @@ if __name__ == "__main__":
             config,
             attn_implementation="sdpa",
             trust_remote_code=True,
-            torch_dtype=args.precision,
+            dtype=args.precision,
         ).to(args.execution_provider.replace("dml", "cuda")).eval()
     else:
         config = AutoConfig.from_pretrained(args.input)
+        device_map = "cuda" if args.execution_provider == "cuda" else None
         model = AutoModel.from_pretrained(
             args.input,
             attn_implementation="sdpa",
             trust_remote_code=True,
-            torch_dtype=args.precision,
-        ).to(args.execution_provider.replace("dml", "cuda")).eval()
+            dtype=args.precision,
+            device_map=device_map,
+        ).eval()
+        if device_map is None:
+            model = model.to(args.execution_provider.replace("dml", "cuda"))
 
     # Apply ONNX-export-friendly patches (replaces PatchMerger with version
     # that uses pure tensor ops instead of Python for-loops during export).
