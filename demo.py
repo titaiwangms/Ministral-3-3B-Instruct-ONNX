@@ -1,3 +1,10 @@
+"""HuggingFace PyTorch inference demo for Ministral-3-3B-Instruct.
+
+This demo runs the full model in PyTorch. For ONNX inference, use the exported
+models from builder.py (model-vision.onnx + model-embedding.onnx) with ONNX Runtime.
+See README.md for build instructions.
+"""
+
 import torch
 from transformers import AutoProcessor, Mistral3ForConditionalGeneration
 
