@@ -11,6 +11,8 @@ import onnxscript
 import onnx_ir as ir
 import onnx_ir.passes.common as common_passes
 
+from modeling_code import patch_model_for_onnx_export
+
 
 def build_vision(args):
     # NOTE: pixel_values shape: [1, 3, H, W] for a single image.
@@ -291,6 +293,10 @@ if __name__ == "__main__":
             trust_remote_code=True,
             torch_dtype=args.precision,
         ).to(args.execution_provider.replace("dml", "cuda")).eval()
+
+    # Apply ONNX-export-friendly patches (replaces PatchMerger with version
+    # that uses pure tensor ops instead of Python for-loops during export).
+    patch_model_for_onnx_export(model)
 
     # Build model components
     if args.part == "embedding":
