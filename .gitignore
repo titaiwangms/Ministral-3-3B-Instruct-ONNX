@@ -1,0 +1,10 @@
+ministral_3b_vision*
+ministral_3b_embedding*
+dump_models
+test/dump
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
