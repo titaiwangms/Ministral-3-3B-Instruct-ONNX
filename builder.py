@@ -4,7 +4,7 @@ import torch
 import shutil
 
 from onnxscript.rewriter import ort_fusions
-from transformers import Mistral3Config, AutoModel, AutoConfig
+from transformers import Mistral3Config, AutoModel, AutoConfig, FineGrainedFP8Config
 
 from modeling_code import patch_model_for_onnx_export
 
@@ -304,12 +304,25 @@ if __name__ == "__main__":
     else:
         config = AutoConfig.from_pretrained(args.input)
         device_map = "cuda" if args.execution_provider == "cuda" else None
+
+        # For ONNX export, dequantize FP8 weights to full precision.
+        # The Ministral-3-3B-Instruct-2512 checkpoint uses FineGrained FP8
+        # quantization which requires a Triton kernel at runtime. Dequantizing
+        # converts FP8Linear layers back to nn.Linear with float weights,
+        # making the model exportable without the kernel dependency.
+        quantization_config = None
+        if getattr(config, "quantization_config", None) is not None:
+            quant_method = config.quantization_config.get("quant_method", "")
+            if quant_method == "fp8":
+                quantization_config = FineGrainedFP8Config(dequantize=True)
+
         model = AutoModel.from_pretrained(
             args.input,
             attn_implementation="sdpa",
             trust_remote_code=True,
             dtype=args.precision,
             device_map=device_map,
+            quantization_config=quantization_config,
         ).eval()
         if device_map is None:
             model = model.to(args.execution_provider.replace("dml", "cuda"))
