@@ -5,12 +5,14 @@ Original source:
     https://github.com/huggingface/transformers/blob/main/src/transformers/models/pixtral/modeling_pixtral.py
 License: Apache 2.0 (Copyright 2025 HuggingFace Inc.)
 
-Changes from original (see modeling_mistral3_original.py for diff reference):
+Changes from original (see modeling_mistral3.diff for a detailed comparison):
 
 1. Mistral3PatchMerger.forward():
    - Added torch.compiler.is_exporting() dispatch
-   - Export path (_forward_export): pure tensor operations, no Python for-loops
-   - Eager path (_forward_eager): preserves original behavior with for-loops
+   - Export path (_forward_export): pure tensor operations replacing Python
+     for-loops and list comprehensions that block torch.onnx.export(dynamo=True)
+   - Eager path (_forward_eager): preserves original behavior for regular inference
+   - Added torch._check guards for unfold/im2col symbolic shape validation
    - Both paths produce numerically identical results
 
 2. PixtralVisionModel patching via pixtral_vision_forward_export():
@@ -20,7 +22,8 @@ Changes from original (see modeling_mistral3_original.py for diff reference):
    - With batch=1, block attention mask is trivially all-zeros (single image =
      full attention), so we skip it entirely and pass attention_mask=None
    - Position IDs computed inline with torch.arange/meshgrid (no for-loop)
-   - Supports dynamic H/W (multiples of patch_size, range [patch_size, image_size])
+   - Supports dynamic H/W (multiples of 28, range [28, config.image_size])
+   - Enforced with torch._check(pixel_values.shape[0] == 1) guard
 
 3. get_image_features .tolist():
    - NOT modified. builder.py's _get_image_features_onnx wrapper handles this

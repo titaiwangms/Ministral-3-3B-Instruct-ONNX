@@ -18,9 +18,6 @@ from transformers import AutoModel
 
 from test.conftest import create_test_config
 from modeling_code.modeling_mistral3 import Mistral3PatchMerger, patch_model_for_onnx_export
-from modeling_code.modeling_mistral3_original import (
-    Mistral3PatchMerger as OriginalMistral3PatchMerger,
-)
 
 
 class TestMistral3PatchMerger:
@@ -113,10 +110,14 @@ class TestMistral3PatchMerger:
         torch.testing.assert_close(forward_output, eager_output)
 
     def test_matches_original_implementation(self):
-        """Modified PatchMerger matches the original HF implementation numerically."""
+        """Modified PatchMerger matches the HuggingFace implementation numerically."""
+        from transformers.models.mistral3.modeling_mistral3 import (
+            Mistral3PatchMerger as HfMistral3PatchMerger,
+        )
+
         config = create_test_config()
 
-        original = OriginalMistral3PatchMerger(config)
+        original = HfMistral3PatchMerger(config)
         modified = Mistral3PatchMerger(config)
 
         # Copy weights from original to modified
