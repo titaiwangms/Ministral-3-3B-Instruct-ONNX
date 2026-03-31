@@ -16,39 +16,10 @@ import numpy as np
 import onnxruntime as ort
 import pytest
 import torch
-from transformers import Mistral3Config, AutoModel
+from transformers import AutoModel
 
-# Ensure repo root is on the path
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO_ROOT)
-
+from test.conftest import create_test_config, REPO_ROOT
 from modeling_code import patch_model_for_onnx_export
-
-
-def _create_test_config():
-    """Create minimal Mistral3Config matching builder.py --no_weights."""
-    return Mistral3Config(
-        vision_config={
-            "model_type": "pixtral",
-            "num_hidden_layers": 1,
-            "hidden_size": 64,
-            "intermediate_size": 128,
-            "num_attention_heads": 4,
-            "head_dim": 16,
-            "patch_size": 14,
-            "image_size": 448,
-        },
-        text_config={
-            "model_type": "mistral",
-            "num_hidden_layers": 2,
-            "hidden_size": 64,
-            "intermediate_size": 128,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 4,
-            "head_dim": 16,
-            "vocab_size": 32000,
-        },
-    )
 
 
 @pytest.fixture(scope="module")
@@ -160,7 +131,7 @@ class TestVisionParity:
 
     def test_in_process_parity(self):
         """In-process export and verify: same model weights for both paths."""
-        config = _create_test_config()
+        config = create_test_config()
         model = AutoModel.from_config(
             config, attn_implementation="sdpa", trust_remote_code=True
         ).eval()

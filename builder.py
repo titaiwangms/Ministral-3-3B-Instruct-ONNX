@@ -3,13 +3,8 @@ import os
 import torch
 import shutil
 
-import onnx
 from onnxscript.rewriter import ort_fusions
 from transformers import Mistral3Config, AutoModel, AutoConfig
-
-import onnxscript
-import onnx_ir as ir
-import onnx_ir.passes.common as common_passes
 
 from modeling_code import patch_model_for_onnx_export
 
@@ -67,20 +62,21 @@ def build_vision(args):
     _original_forward = model.forward
     model.forward = _get_image_features_onnx
 
-    with torch.no_grad():
-        vision_onnx_program = torch.onnx.export(
-            model,
-            kwargs=dummy_inputs,
-            input_names=["pixel_values"],
-            output_names=["image_features"],
-            dynamic_shapes=dynamic_shapes,
-            dynamo=True,
-            optimize=True,
-            opset_version=22,
-        )
-
-    # Restore original forward method
-    model.forward = _original_forward
+    try:
+        with torch.no_grad():
+            vision_onnx_program = torch.onnx.export(
+                model,
+                kwargs=dummy_inputs,
+                input_names=["pixel_values"],
+                output_names=["image_features"],
+                dynamic_shapes=dynamic_shapes,
+                dynamo=True,
+                optimize=True,
+                opset_version=22,
+            )
+    finally:
+        # Restore original forward method even if export fails
+        model.forward = _original_forward
 
     # Apply ORT fusions
     vision_onnx_program.model, optimized_count = ort_fusions.optimize_for_ort(
@@ -169,20 +165,21 @@ def build_embedding(args):
     _original_forward = model.forward
     model.forward = _get_fused_input_embeddings
 
-    with torch.no_grad():
-        embedding_onnx_program = torch.onnx.export(
-            model,
-            dummy_inputs,
-            input_names=["input_ids", "image_features"],
-            output_names=["inputs_embeds"],
-            dynamic_shapes=dynamic_shapes,
-            dynamo=True,
-            optimize=True,
-            opset_version=22,
-        )
-
-    # Restore original forward method
-    model.forward = _original_forward
+    try:
+        with torch.no_grad():
+            embedding_onnx_program = torch.onnx.export(
+                model,
+                dummy_inputs,
+                input_names=["input_ids", "image_features"],
+                output_names=["inputs_embeds"],
+                dynamic_shapes=dynamic_shapes,
+                dynamo=True,
+                optimize=True,
+                opset_version=22,
+            )
+    finally:
+        # Restore original forward method even if export fails
+        model.forward = _original_forward
 
     # Save ONNX model
     os.makedirs(args.output, exist_ok=True)

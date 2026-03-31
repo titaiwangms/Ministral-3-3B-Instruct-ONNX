@@ -16,37 +16,9 @@ import numpy as np
 import onnxruntime as ort
 import pytest
 import torch
-from transformers import Mistral3Config, AutoModel
+from transformers import AutoModel
 
-# Ensure repo root is on the path
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO_ROOT)
-
-
-def _create_test_config():
-    """Create minimal Mistral3Config matching builder.py --no_weights."""
-    return Mistral3Config(
-        vision_config={
-            "model_type": "pixtral",
-            "num_hidden_layers": 1,
-            "hidden_size": 64,
-            "intermediate_size": 128,
-            "num_attention_heads": 4,
-            "head_dim": 16,
-            "patch_size": 14,
-            "image_size": 448,
-        },
-        text_config={
-            "model_type": "mistral",
-            "num_hidden_layers": 2,
-            "hidden_size": 64,
-            "intermediate_size": 128,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 4,
-            "head_dim": 16,
-            "vocab_size": 32000,
-        },
-    )
+from test.conftest import create_test_config, REPO_ROOT
 
 
 @pytest.fixture(scope="module")
@@ -134,21 +106,26 @@ class TestEmbeddingOrtInference:
         assert outputs[0].shape == (batch_size, sequence_length, hidden_size)
 
     def test_dynamic_sequence_length(self, embedding_model_path):
-        """Embedding model supports dynamic sequence lengths."""
+        """Embedding model supports dynamic sequence lengths with masked_scatter."""
         session = ort.InferenceSession(embedding_model_path)
+        config = create_test_config()
 
-        # Shorter sequence
+        # Shorter sequence with image tokens placed to exercise masked_scatter
+        num_image_tokens = 50
         input_ids = np.random.randint(0, 32000, (1, 100)).astype(np.int64)
-        image_features = np.random.randn(50, 64).astype(np.float32)
+        input_ids[0, 5 : 5 + num_image_tokens] = config.image_token_id
+        image_features = np.random.randn(num_image_tokens, 64).astype(np.float32)
         outputs = session.run(
             None,
             {"input_ids": input_ids, "image_features": image_features},
         )
         assert outputs[0].shape == (1, 100, 64)
 
-        # Longer sequence
+        # Longer sequence with image tokens
+        num_image_tokens = 300
         input_ids = np.random.randint(0, 32000, (1, 500)).astype(np.int64)
-        image_features = np.random.randn(300, 64).astype(np.float32)
+        input_ids[0, 10 : 10 + num_image_tokens] = config.image_token_id
+        image_features = np.random.randn(num_image_tokens, 64).astype(np.float32)
         outputs = session.run(
             None,
             {"input_ids": input_ids, "image_features": image_features},
@@ -179,7 +156,7 @@ class TestEmbeddingParity:
 
     def test_in_process_parity(self):
         """In-process export and verify: same model weights for both paths."""
-        config = _create_test_config()
+        config = create_test_config()
         model = AutoModel.from_config(
             config, attn_implementation="sdpa", trust_remote_code=True
         ).eval()

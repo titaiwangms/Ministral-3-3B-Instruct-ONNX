@@ -14,38 +14,13 @@ import pytest
 # Ensure repo root is on the path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from transformers import Mistral3Config, AutoModel
+from transformers import AutoModel
 
+from test.conftest import create_test_config
 from modeling_code.modeling_mistral3 import Mistral3PatchMerger, patch_model_for_onnx_export
 from modeling_code.modeling_mistral3_original import (
     Mistral3PatchMerger as OriginalMistral3PatchMerger,
 )
-
-
-def _create_test_config():
-    """Create a minimal Mistral3Config for testing (matches builder.py --no_weights)."""
-    return Mistral3Config(
-        vision_config={
-            "model_type": "pixtral",
-            "num_hidden_layers": 1,
-            "hidden_size": 64,
-            "intermediate_size": 128,
-            "num_attention_heads": 4,
-            "head_dim": 16,
-            "patch_size": 14,
-            "image_size": 448,
-        },
-        text_config={
-            "model_type": "mistral",
-            "num_hidden_layers": 2,
-            "hidden_size": 64,
-            "intermediate_size": 128,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 4,
-            "head_dim": 16,
-            "vocab_size": 32000,
-        },
-    )
 
 
 class TestMistral3PatchMerger:
@@ -53,7 +28,7 @@ class TestMistral3PatchMerger:
 
     def test_export_matches_eager_single_image(self):
         """Export path produces identical output to eager path for single 448x448 image."""
-        config = _create_test_config()
+        config = create_test_config()
         merger = Mistral3PatchMerger(config)
 
         # 448x448 image with patch_size=14 -> 32x32 = 1024 patches
@@ -69,7 +44,7 @@ class TestMistral3PatchMerger:
 
     def test_export_matches_eager_rectangular_image(self):
         """Export path matches eager for a non-square image (448x224)."""
-        config = _create_test_config()
+        config = create_test_config()
         merger = Mistral3PatchMerger(config)
 
         # 448x224: patches = (32, 16) = 512 tokens
@@ -86,7 +61,7 @@ class TestMistral3PatchMerger:
 
     def test_output_shape_single_image(self):
         """Output shape is correct after spatial merging."""
-        config = _create_test_config()
+        config = create_test_config()
         merger = Mistral3PatchMerger(config)
 
         num_patches = 1024  # 32 * 32
@@ -103,7 +78,7 @@ class TestMistral3PatchMerger:
 
     def test_output_shape_rectangular(self):
         """Output shape is correct for rectangular image."""
-        config = _create_test_config()
+        config = create_test_config()
         merger = Mistral3PatchMerger(config)
 
         patch_h, patch_w = 32, 16  # 448x224
@@ -122,7 +97,7 @@ class TestMistral3PatchMerger:
 
     def test_forward_uses_eager_outside_export(self):
         """forward() uses eager path when not in export context."""
-        config = _create_test_config()
+        config = create_test_config()
         merger = Mistral3PatchMerger(config)
 
         num_patches = 1024
@@ -139,7 +114,7 @@ class TestMistral3PatchMerger:
 
     def test_matches_original_implementation(self):
         """Modified PatchMerger matches the original HF implementation numerically."""
-        config = _create_test_config()
+        config = create_test_config()
 
         original = OriginalMistral3PatchMerger(config)
         modified = Mistral3PatchMerger(config)
@@ -161,7 +136,7 @@ class TestMistral3PatchMerger:
 
     def test_gradient_flow(self):
         """Gradients flow through the export path."""
-        config = _create_test_config()
+        config = create_test_config()
         merger = Mistral3PatchMerger(config)
 
         num_patches = 1024
@@ -182,7 +157,7 @@ class TestPatchModelForOnnxExport:
 
     def test_patches_conditional_generation_model(self):
         """Patches a Mistral3ForConditionalGeneration model."""
-        config = _create_test_config()
+        config = create_test_config()
         model = AutoModel.from_config(
             config,
             attn_implementation="sdpa",
@@ -203,7 +178,7 @@ class TestPatchModelForOnnxExport:
 
     def test_patched_model_preserves_weights(self):
         """Patching preserves the model's learned weights."""
-        config = _create_test_config()
+        config = create_test_config()
         model = AutoModel.from_config(
             config,
             attn_implementation="sdpa",
@@ -223,7 +198,7 @@ class TestPatchModelForOnnxExport:
 
     def test_patched_model_produces_same_output(self):
         """Patched model produces identical output to unpatched model."""
-        config = _create_test_config()
+        config = create_test_config()
         model = AutoModel.from_config(
             config,
             attn_implementation="sdpa",
@@ -253,7 +228,7 @@ class TestPatchModelForOnnxExport:
 
     def test_returns_same_model_instance(self):
         """patch_model_for_onnx_export returns the same model object."""
-        config = _create_test_config()
+        config = create_test_config()
         model = AutoModel.from_config(
             config,
             attn_implementation="sdpa",
