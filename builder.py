@@ -82,6 +82,7 @@ def build_vision(args):
     print("ORT optimized fusion counts:", optimized_count)
 
     # Save ONNX model
+    os.makedirs(args.output, exist_ok=True)
     filename = "model-vision.onnx"
     vision_init_export = os.path.join(args.output, "vision_init_export")
     os.makedirs(vision_init_export, exist_ok=True)
