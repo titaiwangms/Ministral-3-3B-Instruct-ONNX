@@ -154,6 +154,7 @@ def build_embedding(args):
     # Equivalent to the masked_scatter step in Mistral3Model.forward.
     def _get_fused_input_embeddings(input_ids, image_features):
         inputs_embeds = model.get_input_embeddings()(input_ids)
+        image_features = image_features.to(inputs_embeds.dtype)
         special_image_mask = input_ids == model.config.image_token_id
         expanded_image_mask = (
             special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
