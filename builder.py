@@ -23,27 +23,45 @@ def build_vision(args):
         args.execution_provider.replace("dml", "cuda")
     )
 
-    # image_sizes: [num_images, 2] – (height, width) in pixels for each image.
-    image_sizes = torch.tensor([[448, 448]], dtype=torch.int64).to(
-        args.execution_provider.replace("dml", "cuda")
-    )
-
-    dummy_inputs = {"pixel_values": pixel_values, "image_sizes": image_sizes}
+    dummy_inputs = {"pixel_values": pixel_values}
     # Shape is fixed for the vision model because the Pixtral patch-merger relies on
     # static image dimensions when constructing the block-attention mask.
-    dynamic_shapes = {"pixel_values": {}, "image_sizes": None}
+    dynamic_shapes = {"pixel_values": {}}
 
-    # Export-friendly wrapper: get_image_features returns BaseModelOutputWithPooling
-    # whose pooler_output is a tuple of per-image feature tensors.  We cat them into
-    # a single tensor so that the exported model has a single tensor output.
-    def _get_image_features_onnx(pixel_values, image_sizes):
-        result = model.model.get_image_features(
-            pixel_values=pixel_values,
-            image_sizes=image_sizes,
+    # Export-friendly wrapper that calls the vision pipeline components directly.
+    # We bypass get_image_features() to avoid two ONNX export blockers:
+    # 1. PixtralVisionModel.forward uses tensor-valued image_sizes for slicing
+    #    (GuardOnDataDependentSymNode). Passing image_sizes=None lets Pixtral
+    #    derive dimensions from pixel_values.shape (static Python ints).
+    # 2. get_image_features .tolist() for torch.split – unnecessary for single image.
+    def _get_image_features_onnx(pixel_values):
+        image_outputs = model.vision_tower(
+            pixel_values,
+            output_hidden_states=True,
             return_dict=True,
         )
-        # pooler_output: tuple of [num_tokens_i, text_hidden_size] per image
-        return torch.cat(result.pooler_output, dim=0)
+
+        vision_feature_layer = model.config.vision_feature_layer
+        if isinstance(vision_feature_layer, int):
+            selected_image_feature = image_outputs.hidden_states[vision_feature_layer]
+        else:
+            hs_pool = [
+                image_outputs.hidden_states[layer_idx]
+                for layer_idx in vision_feature_layer
+            ]
+            selected_image_feature = torch.cat(hs_pool, dim=-1)
+
+        # Construct image_sizes from pixel_values.shape (Python ints, not tensor values)
+        # so PatchMerger._forward_export can use them without data-dependent guards.
+        image_sizes = torch.tensor(
+            [[pixel_values.shape[-2], pixel_values.shape[-1]]],
+            dtype=torch.int64,
+            device=pixel_values.device,
+        )
+        image_features = model.multi_modal_projector(
+            selected_image_feature.squeeze(0), image_sizes
+        )
+        return image_features
 
     # NOTE: hack to vision model export – swap forward with the ONNX-friendly wrapper.
     _original_forward = model.forward
@@ -53,7 +71,7 @@ def build_vision(args):
         vision_onnx_program = torch.onnx.export(
             model,
             kwargs=dummy_inputs,
-            input_names=["pixel_values", "image_sizes"],
+            input_names=["pixel_values"],
             output_names=["image_features"],
             dynamic_shapes=dynamic_shapes,
             dynamo=True,
@@ -87,8 +105,8 @@ def build_vision(args):
     shutil.rmtree(vision_init_export)
 
     # Verify parity
-    onnx_outputs = vision_onnx_program(pixel_values, image_sizes)
-    pytorch_outputs = _get_image_features_onnx(pixel_values, image_sizes)
+    onnx_outputs = vision_onnx_program(pixel_values)
+    pytorch_outputs = _get_image_features_onnx(pixel_values)
 
     torch.testing.assert_close(
         tuple(onnx_outputs),
@@ -139,7 +157,7 @@ def build_embedding(args):
     # Export-friendly wrapper that fuses token and image embeddings.
     # Equivalent to the masked_scatter step in Mistral3Model.forward.
     def _get_fused_input_embeddings(input_ids, image_features):
-        inputs_embeds = model.model.get_input_embeddings()(input_ids)
+        inputs_embeds = model.get_input_embeddings()(input_ids)
         special_image_mask = input_ids == model.config.image_token_id
         expanded_image_mask = (
             special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)

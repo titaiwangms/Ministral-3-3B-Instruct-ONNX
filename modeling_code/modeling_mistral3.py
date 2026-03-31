@@ -90,6 +90,13 @@ class Mistral3PatchMerger(nn.Module):
             image_features.view(patch_h, patch_w, d).permute(2, 0, 1).unsqueeze(0)
         )
 
+        # Guards required by torch.export: unfold/im2col needs to verify that
+        # spatial dimensions are non-zero and large enough for the kernel.
+        torch._check(image_grid.shape[2] != 0)
+        torch._check(image_grid.shape[3] != 0)
+        torch._check(image_grid.shape[2] // self.spatial_merge_size > 0)
+        torch._check(image_grid.shape[3] // self.spatial_merge_size > 0)
+
         # Extract spatial_merge_size x spatial_merge_size windows
         # unfold output: [1, d * merge_size^2, num_merged_patches]
         grid = torch.nn.functional.unfold(
