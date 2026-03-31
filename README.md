@@ -18,7 +18,7 @@ Exports the vision and embedding components of the Mistral 3 multimodal architec
 
 We export 2 models from the Ministral-3-3B multimodal architecture:
 
-1. **Vision model** (`model-vision.onnx`) — Pixtral vision encoder + multi-modal projector. Takes raw pixel values and outputs image features in the text embedding space.
+1. **Vision model** (`model-vision.onnx`) — Pixtral vision encoder + multi-modal projector. Takes `pixel_values` of shape `[1, 3, H, W]` (dynamic H/W, multiples of 28) and outputs image features in the text embedding space.
 2. **Embedding model** (`model-embedding.onnx`) — Token embedding layer with image feature fusion via `masked_scatter`. Takes `input_ids` + `image_features` and outputs fused `inputs_embeds`.
 
 ### Build
@@ -66,7 +66,7 @@ pytest test/ -v
 
 The test suite covers:
 - **`modeling_code/test_modeling_mistral3.py`** — Unit tests for the PatchMerger rewrite (export vs. eager parity, shape correctness, weight preservation, gradient flow)
-- **`test/test_vision_export.py`** — End-to-end vision export: builds the ONNX model, loads it in ONNX Runtime, validates shapes and parity
+- **`test/test_vision_export.py`** — End-to-end vision export: builds the ONNX model, loads it in ONNX Runtime, validates shapes, dynamic H/W support, and parity
 - **`test/test_embedding_export.py`** — End-to-end embedding export: builds the ONNX model, validates dynamic sequence lengths, masked_scatter correctness
 
 All tests use `--no_weights` (random initialization) and require no model download.
@@ -75,7 +75,7 @@ All tests use `--no_weights` (random initialization) and require no model downlo
 
 `Mistral3ForConditionalGeneration` is composed of:
 
-- **`vision_tower`** — `PixtralVisionModel` that accepts raw pixel values and returns patch hidden states.
+- **`vision_tower`** — `PixtralVisionModel` that accepts `pixel_values [1, 3, H, W]` and returns patch hidden states. H and W are dynamic (multiples of `patch_size × spatial_merge_size = 28`, range `[28, image_size]`).
 - **`multi_modal_projector`** — `Mistral3MultiModalProjector` (PatchMerger + MLP) that maps vision features to the text hidden-size space.
 - **`language_model`** — Standard Mistral decoder (not exported here).
 
@@ -102,19 +102,21 @@ test/
 
 ### Key rewrites (see `modeling_code/`)
 
-The only code change needed is to `Mistral3PatchMerger.forward()`. The original uses Python for-loops and list comprehensions that `torch.export` cannot trace.
+Two components were rewritten for ONNX export compatibility with dynamic shapes:
 
-**What was rewritten:**
-
-`Mistral3PatchMerger` — Replaced with a dual-path implementation:
+**1. `Mistral3PatchMerger`** — Replaced with a dual-path implementation:
 - `_forward_export()`: Pure tensor operations (`unfold` + reshape) — used during ONNX export via `torch.compiler.is_exporting()` dispatch.
 - `_forward_eager()`: Original for-loop behavior — used during normal inference.
 - Both paths produce numerically identical results (validated by tests).
 
+**2. `PixtralVisionModel.forward`** — Replaced with export-aware dispatch:
+- Skips `generate_block_attention_mask` — with batch=1 (single image), the attention mask is trivially all-zeros (full attention), so `attention_mask=None` is passed instead.
+- Computes position IDs inline with `torch.arange`/`meshgrid` — replaces `position_ids_in_meshgrid` which uses a Python for-loop over the batch.
+- Supports dynamic H/W (any multiple of `patch_size`).
+
 **What was NOT rewritten:**
 
-- `generate_block_attention_mask` — With static shapes (single 448×448 image), dynamo unrolls the single-iteration loop at compile time. No changes needed.
-- `get_image_features` `.tolist()` — With static `image_sizes`, dynamo evaluates `.tolist()` at compile time. `builder.py` also works around this with a custom `_get_image_features_onnx` wrapper.
+- `get_image_features` `.tolist()` — `builder.py`'s `_get_image_features_onnx` wrapper calls vision components directly, bypassing this.
 
 ### ONNX export fixes
 
@@ -122,6 +124,8 @@ Three issues were resolved to make the export work:
 
 1. **`model.model.xxx` attribute path** — `AutoModel.from_config()` returns `Mistral3Model` (not `Mistral3ForConditionalGeneration`), so `multi_modal_projector` is directly on `model`, not `model.model`. The `patch_model_for_onnx_export()` function handles both layouts.
 
-2. **`image_sizes=None` guard** — Passing `image_sizes` as a tensor to `PixtralVisionModel.forward` triggers `GuardOnDataDependentSymNode` because the model slices using tensor values. Fix: `builder.py` passes `image_sizes=None` to the vision tower and constructs `image_sizes` from `pixel_values.shape` (Python ints) for the PatchMerger.
+2. **`generate_block_attention_mask` dynamic shapes** — The original uses `torch.tensor()` from symbolic values and Python for-loops with symbolic bounds, which `torch.export` cannot trace under dynamic shapes. Fix: with batch=1, the mask is trivially all-zeros (single image = full attention), so we skip it entirely and pass `attention_mask=None`.
 
 3. **`torch._check` guards** — The `unfold` operation in `_forward_export` requires explicit guards (`torch._check`) to prove that spatial dimensions are non-zero and large enough for the kernel. Without these, `torch.export` raises shape constraint errors.
+
+4. **`position_ids_in_meshgrid` for-loop** — The original iterates over the batch with a Python for-loop. Fix: compute position IDs inline with `torch.arange`/`meshgrid` for the single image (batch=1).
