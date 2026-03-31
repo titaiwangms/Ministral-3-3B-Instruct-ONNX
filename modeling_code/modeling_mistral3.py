@@ -161,6 +161,9 @@ def pixtral_vision_forward_export(self, pixel_values, **kwargs):
 
     Supports dynamic H/W where H and W are multiples of patch_size.
     """
+    # Structurally enforce batch=1 — the mask-skip is only valid for single image
+    torch._check(pixel_values.shape[0] == 1)
+
     # Conv2d: [1, 3, H, W] -> [1, hidden, H/patch_size, W/patch_size]
     target_dtype = self.patch_conv.weight.dtype
     patch_embeds = self.patch_conv(pixel_values.to(dtype=target_dtype))
