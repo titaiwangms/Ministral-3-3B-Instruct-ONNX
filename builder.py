@@ -4,50 +4,47 @@ import torch
 import shutil
 
 from onnxscript.rewriter import ort_fusions
-from transformers import Mistral3Config, AutoModel, AutoConfig
+from transformers import Mistral3Config, AutoModel, AutoConfig, FineGrainedFP8Config
 
 from modeling_code import patch_model_for_onnx_export
 
 
 def build_vision(args):
     # NOTE: pixel_values shape: [1, 3, H, W] for a single image.
-    # Using a 448x448 image (32x32 patches with patch_size=14, yielding 256 logical
-    # tokens after spatial merge by 2).
+    # H and W are dynamic (multiples of 28 = patch_size * spatial_merge_size).
+    # Using 448x448 as the dummy/tracing input.
     pixel_values = torch.randn((1, 3, 448, 448), dtype=torch.float32)
     pixel_values = pixel_values.to(args.precision).to(
         args.execution_provider.replace("dml", "cuda")
     )
 
     dummy_inputs = {"pixel_values": pixel_values}
-    # Shape is fixed for the vision model because the Pixtral patch-merger relies on
-    # static image dimensions when constructing the block-attention mask.
-    dynamic_shapes = {"pixel_values": {}}
+
+    # H and W are dynamic: multiples of 28 (patch_size=14 × spatial_merge_size=2).
+    # Range: [28, max_image_size] where max_image_size comes from vision config.
+    # For the test config (image_size=448): max=448. For real model (image_size=1540): max=1540.
+    max_image_size = config.vision_config.image_size
+    height_dim = torch.export.Dim("height", min=28, max=max_image_size)
+    width_dim = torch.export.Dim("width", min=28, max=max_image_size)
+    dynamic_shapes = {"pixel_values": {2: height_dim, 3: width_dim}}
 
     # Export-friendly wrapper that calls the vision pipeline components directly.
-    # We bypass get_image_features() to avoid two ONNX export blockers:
-    # 1. PixtralVisionModel.forward uses tensor-valued image_sizes for slicing
-    #    (GuardOnDataDependentSymNode). Passing image_sizes=None lets Pixtral
-    #    derive dimensions from pixel_values.shape (static Python ints).
-    # 2. get_image_features .tolist() for torch.split – unnecessary for single image.
+    # The patched vision tower handles dynamic H/W by:
+    # 1. Skipping generate_block_attention_mask (trivial for batch=1)
+    # 2. Computing position_ids inline with torch.arange/meshgrid
     def _get_image_features_onnx(pixel_values):
         image_outputs = model.vision_tower(
             pixel_values,
-            output_hidden_states=True,
             return_dict=True,
         )
 
-        vision_feature_layer = model.config.vision_feature_layer
-        if isinstance(vision_feature_layer, int):
-            selected_image_feature = image_outputs.hidden_states[vision_feature_layer]
-        else:
-            hs_pool = [
-                image_outputs.hidden_states[layer_idx]
-                for layer_idx in vision_feature_layer
-            ]
-            selected_image_feature = torch.cat(hs_pool, dim=-1)
+        # Use last_hidden_state directly. During export, the patched vision
+        # tower returns BaseModelOutput without hidden_states collection
+        # (the @capture_outputs decorator is bypassed). For single-layer
+        # vision_feature_layer=-1, last_hidden_state == hidden_states[-1].
+        selected_image_feature = image_outputs.last_hidden_state
 
-        # Construct image_sizes from pixel_values.shape (Python ints, not tensor values)
-        # so PatchMerger._forward_export can use them without data-dependent guards.
+        # Construct image_sizes from pixel_values.shape (symbolic dims, not tensor values)
         image_sizes = torch.tensor(
             [[pixel_values.shape[-2], pixel_values.shape[-1]]],
             dtype=torch.int64,
@@ -85,6 +82,7 @@ def build_vision(args):
     print("ORT optimized fusion counts:", optimized_count)
 
     # Save ONNX model
+    os.makedirs(args.output, exist_ok=True)
     filename = "model-vision.onnx"
     vision_init_export = os.path.join(args.output, "vision_init_export")
     os.makedirs(vision_init_export, exist_ok=True)
@@ -154,6 +152,7 @@ def build_embedding(args):
     # Equivalent to the masked_scatter step in Mistral3Model.forward.
     def _get_fused_input_embeddings(input_ids, image_features):
         inputs_embeds = model.get_input_embeddings()(input_ids)
+        image_features = image_features.to(inputs_embeds.dtype)
         special_image_mask = input_ids == model.config.image_token_id
         expanded_image_mask = (
             special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
@@ -298,16 +297,33 @@ if __name__ == "__main__":
             config,
             attn_implementation="sdpa",
             trust_remote_code=True,
-            torch_dtype=args.precision,
+            dtype=args.precision,
         ).to(args.execution_provider.replace("dml", "cuda")).eval()
     else:
         config = AutoConfig.from_pretrained(args.input)
+        device_map = "cuda" if args.execution_provider == "cuda" else None
+
+        # For ONNX export, dequantize FP8 weights to full precision.
+        # The Ministral-3-3B-Instruct-2512 checkpoint uses FineGrained FP8
+        # quantization which requires a Triton kernel at runtime. Dequantizing
+        # converts FP8Linear layers back to nn.Linear with float weights,
+        # making the model exportable without the kernel dependency.
+        quantization_config = None
+        if getattr(config, "quantization_config", None) is not None:
+            quant_method = config.quantization_config.get("quant_method", "")
+            if quant_method == "fp8":
+                quantization_config = FineGrainedFP8Config(dequantize=True)
+
         model = AutoModel.from_pretrained(
             args.input,
             attn_implementation="sdpa",
             trust_remote_code=True,
-            torch_dtype=args.precision,
-        ).to(args.execution_provider.replace("dml", "cuda")).eval()
+            dtype=args.precision,
+            device_map=device_map,
+            quantization_config=quantization_config,
+        ).eval()
+        if device_map is None:
+            model = model.to(args.execution_provider.replace("dml", "cuda"))
 
     # Apply ONNX-export-friendly patches (replaces PatchMerger with version
     # that uses pure tensor ops instead of Python for-loops during export).

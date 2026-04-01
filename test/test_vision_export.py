@@ -110,6 +110,23 @@ class TestVisionOrtInference:
 
         assert np.all(np.isfinite(outputs[0]))
 
+    def test_dynamic_height_width(self, vision_model_path):
+        """Vision model accepts dynamic H/W (multiples of 28)."""
+        session = ort.InferenceSession(vision_model_path)
+
+        test_cases = [
+            (448, 448, 256),   # 16*16 merged tokens
+            (224, 448, 128),   # 8*16 merged tokens
+            (28, 28, 1),       # minimum: 1*1 merged token
+            (196, 392, 98),    # 7*14 merged tokens
+        ]
+        for h, w, expected_tokens in test_cases:
+            pixel_values = np.random.randn(1, 3, h, w).astype(np.float32)
+            outputs = session.run(None, {"pixel_values": pixel_values})
+            assert outputs[0].shape[0] == expected_tokens, (
+                f"For {h}x{w}: expected {expected_tokens} tokens, got {outputs[0].shape[0]}"
+            )
+
 
 class TestVisionParity:
     """Tests that ONNX output matches PyTorch reference."""
@@ -141,16 +158,9 @@ class TestVisionParity:
 
         def _get_image_features_onnx(pixel_values):
             image_outputs = model.vision_tower(
-                pixel_values, output_hidden_states=True, return_dict=True,
+                pixel_values, return_dict=True,
             )
-            vision_feature_layer = model.config.vision_feature_layer
-            if isinstance(vision_feature_layer, int):
-                selected = image_outputs.hidden_states[vision_feature_layer]
-            else:
-                selected = torch.cat(
-                    [image_outputs.hidden_states[l] for l in vision_feature_layer],
-                    dim=-1,
-                )
+            selected = image_outputs.last_hidden_state
             image_sizes = torch.tensor(
                 [[pixel_values.shape[-2], pixel_values.shape[-1]]],
                 dtype=torch.int64,
@@ -161,13 +171,17 @@ class TestVisionParity:
         _original_forward = model.forward
         model.forward = _get_image_features_onnx
 
+        max_image_size = config.vision_config.image_size
+        height_dim = torch.export.Dim("height", min=28, max=max_image_size)
+        width_dim = torch.export.Dim("width", min=28, max=max_image_size)
+
         with torch.no_grad():
             onnx_program = torch.onnx.export(
                 model,
                 kwargs={"pixel_values": pixel_values},
                 input_names=["pixel_values"],
                 output_names=["image_features"],
-                dynamic_shapes={"pixel_values": {}},
+                dynamic_shapes={"pixel_values": {2: height_dim, 3: width_dim}},
                 dynamo=True,
                 optimize=True,
                 opset_version=22,
