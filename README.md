@@ -58,18 +58,29 @@ python builder.py --no_weights --part embedding -i . -o ./output -p fp32 -e cpu
 
 ### Tests
 
-Run the full test suite:
+Run unit tests (no GPU or model download required):
 
 ```bash
-pytest test/ -v
+pytest modeling_code/test_modeling_mistral3.py test/test_vision_export.py test/test_embedding_export.py -v
+```
+
+Run real-weight tests (requires CUDA GPU and downloads ~6GB model):
+
+```bash
+pytest test/test_real_weights.py -v
+```
+
+Run all tests:
+
+```bash
+pytest modeling_code/ test/ -v
 ```
 
 The test suite covers:
 - **`modeling_code/test_modeling_mistral3.py`** — Unit tests for the PatchMerger rewrite (export vs. eager parity, shape correctness, weight preservation, gradient flow)
-- **`test/test_vision_export.py`** — End-to-end vision export: builds the ONNX model, loads it in ONNX Runtime, validates shapes, dynamic H/W support, and parity
-- **`test/test_embedding_export.py`** — End-to-end embedding export: builds the ONNX model, validates dynamic sequence lengths, masked_scatter correctness
-
-All tests use `--no_weights` (random initialization) and require no model download.
+- **`test/test_vision_export.py`** — End-to-end vision export with `--no_weights`: builds the ONNX model, loads it in ONNX Runtime, validates shapes, dynamic H/W support, and multi-size parity
+- **`test/test_embedding_export.py`** — End-to-end embedding export with `--no_weights`: builds the ONNX model, validates dynamic sequence lengths, masked_scatter correctness, multi-batch parity
+- **`test/test_real_weights.py`** — Real-weight validation with `mistralai/Ministral-3-3B-Instruct-2512`: FP8 dequantization check, export success, ORT loading, parity at multiple image sizes, dynamic shapes
 
 ### Architecture overview
 
@@ -92,12 +103,14 @@ builder.py                 # ONNX export pipeline (vision + embedding)
 demo.py                    # HuggingFace inference demo (PyTorch, not ONNX)
 modeling_code/
   __init__.py              # Public API: patch_model_for_onnx_export()
-  modeling_mistral3.py     # ONNX-friendly PatchMerger (export + eager paths)
-  modeling_mistral3_original.py  # Original HF code (kept for diff reference)
+  modeling_mistral3.py     # ONNX-friendly PatchMerger + PixtralVisionModel patches
+  modeling_mistral3.diff   # Diff showing changes from original HF source
   test_modeling_mistral3.py      # Unit tests for PatchMerger rewrite
 test/
-  test_vision_export.py    # End-to-end vision ONNX export tests
-  test_embedding_export.py # End-to-end embedding ONNX export tests
+  conftest.py              # Shared test configuration (create_test_config)
+  test_vision_export.py    # End-to-end vision ONNX export tests (no-weights)
+  test_embedding_export.py # End-to-end embedding ONNX export tests (no-weights)
+  test_real_weights.py     # Real-weight export + parity tests (requires GPU)
 ```
 
 ### Key rewrites (see `modeling_code/`)
