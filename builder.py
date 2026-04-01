@@ -32,6 +32,14 @@ def build_vision(args):
     # The patched vision tower handles dynamic H/W by:
     # 1. Skipping generate_block_attention_mask (trivial for batch=1)
     # 2. Computing position_ids inline with torch.arange/meshgrid
+    #
+    # Differences from HF's Mistral3Model.get_image_features (line ~219):
+    # - Uses last_hidden_state instead of output_hidden_states=True + indexing.
+    #   Equivalent when vision_feature_layer=-1 (the default and only supported case).
+    # - Only supports single vision_feature_layer (not multi-layer concatenation).
+    # - Derives image_sizes from pixel_values.shape instead of a separate parameter,
+    #   giving torch.export static Python ints instead of data-dependent tensor values.
+    # - Returns flat features instead of split pooler_output tuple (single image).
     def _get_image_features_onnx(pixel_values):
         image_outputs = model.vision_tower(
             pixel_values,
@@ -119,7 +127,9 @@ def build_embedding(args):
     #   patches per side = 448 / 14 = 32
     #   after spatial merge (2x2): 16 per side → 16 * 16 = 256 logical tokens
     patches_per_image = 256
-    batch_size = 1
+    # Use batch_size=2 to prevent torch.export from specializing on batch=1
+    # (same pattern as Qwen builder.py).
+    batch_size = 2
     sequence_length = patches_per_image + 10  # 10 extra text tokens
 
     img_start_index = 3
@@ -132,11 +142,12 @@ def build_embedding(args):
         device=args.execution_provider.replace("dml", "cuda"),
         dtype=torch.int64,
     )
-    # Mark image-token positions with the model's image_token_id
-    input_ids[0][img_start_index:img_end_index] = config.image_token_id
+    # Mark image-token positions with the model's image_token_id in both batch entries
+    for b in range(batch_size):
+        input_ids[b][img_start_index:img_end_index] = config.image_token_id
 
     image_features = torch.randn(
-        patches_per_image,
+        batch_size * patches_per_image,
         text_hidden_size,
         device=args.execution_provider.replace("dml", "cuda"),
         dtype=args.precision,
@@ -149,7 +160,14 @@ def build_embedding(args):
     }
 
     # Export-friendly wrapper that fuses token and image embeddings.
-    # Equivalent to the masked_scatter step in Mistral3Model.forward.
+    #
+    # Differences from HF's Mistral3Model.forward (lines ~307-313):
+    # - Skips get_placeholder_mask's safety check (torch_compilable_check) which
+    #   verifies image token count matches feature count — not exportable.
+    # - Only handles the input_ids path (not the input_ids=None fallback where
+    #   special_image_mask is derived from inputs_embeds comparison).
+    # - Casts image_features to inputs_embeds.dtype (handles FP8→fp16 mismatch).
+    # - The core masked_scatter logic is identical to the HF implementation.
     def _get_fused_input_embeddings(input_ids, image_features):
         inputs_embeds = model.get_input_embeddings()(input_ids)
         image_features = image_features.to(inputs_embeds.dtype)
