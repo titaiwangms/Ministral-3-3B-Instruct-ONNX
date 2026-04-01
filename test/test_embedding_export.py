@@ -155,32 +155,36 @@ class TestEmbeddingParity:
         assert os.path.exists(model_path)
 
     def test_in_process_parity(self):
-        """In-process export and verify: same model weights for both paths."""
+        """In-process export and verify with multiple batch/sequence sizes."""
         config = create_test_config()
         model = AutoModel.from_config(
             config, attn_implementation="sdpa", trust_remote_code=True
         ).eval()
 
-        batch_size = 1
+        hidden_size = config.text_config.hidden_size
+
+        # Use batch_size=2 for export (matches builder.py)
+        batch_size = 2
         patches_per_image = 256
         sequence_length = patches_per_image + 10
-        hidden_size = config.text_config.hidden_size
 
         input_ids = torch.randint(
             0, config.text_config.vocab_size, (batch_size, sequence_length)
         )
-        input_ids[0, 3 : 3 + patches_per_image] = config.image_token_id
-        image_features = torch.randn(patches_per_image, hidden_size)
+        for b in range(batch_size):
+            input_ids[b, 3 : 3 + patches_per_image] = config.image_token_id
+        image_features = torch.randn(batch_size * patches_per_image, hidden_size)
 
         def _get_fused_input_embeddings(input_ids, image_features):
             inputs_embeds = model.get_input_embeddings()(input_ids)
+            image_features_cast = image_features.to(inputs_embeds.dtype)
             special_image_mask = input_ids == model.config.image_token_id
             expanded_image_mask = (
                 special_image_mask.unsqueeze(-1)
                 .expand_as(inputs_embeds)
                 .to(inputs_embeds.device)
             )
-            return inputs_embeds.masked_scatter(expanded_image_mask, image_features)
+            return inputs_embeds.masked_scatter(expanded_image_mask, image_features_cast)
 
         _original_forward = model.forward
         model.forward = _get_fused_input_embeddings
@@ -201,18 +205,33 @@ class TestEmbeddingParity:
             )
         model.forward = _original_forward
 
-        with torch.no_grad():
-            onnx_output = onnx_program(input_ids, image_features)
-            pytorch_output = _get_fused_input_embeddings(input_ids, image_features)
+        # Test parity at multiple batch sizes and sequence lengths
+        test_cases = [
+            # (batch_size, num_image_tokens, num_text_tokens)
+            (1, 256, 10),
+            (2, 128, 20),
+            (1, 64, 50),
+        ]
+        for bs, n_img, n_txt in test_cases:
+            seq_len = n_img + n_txt
+            ids = torch.randint(0, config.text_config.vocab_size, (bs, seq_len))
+            for b in range(bs):
+                ids[b, 3 : 3 + n_img] = config.image_token_id
+            feats = torch.randn(bs * n_img, hidden_size)
 
-        torch.testing.assert_close(
-            tuple(onnx_output),
-            (pytorch_output,),
-            atol=0.01,
-            rtol=0.01,
-            equal_nan=True,
-            check_device=False,
-        )
+            with torch.no_grad():
+                onnx_output = onnx_program(ids, feats)
+                pytorch_output = _get_fused_input_embeddings(ids, feats)
+
+            torch.testing.assert_close(
+                tuple(onnx_output),
+                (pytorch_output,),
+                atol=0.01,
+                rtol=0.01,
+                equal_nan=True,
+                check_device=False,
+                msg=f"Parity failed for batch={bs}, img_tokens={n_img}, txt_tokens={n_txt}",
+            )
 
 
 if __name__ == "__main__":

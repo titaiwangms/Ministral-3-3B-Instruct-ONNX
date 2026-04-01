@@ -188,18 +188,23 @@ class TestVisionParity:
             )
         model.forward = _original_forward
 
-        with torch.no_grad():
-            onnx_output = onnx_program(pixel_values)
-            pytorch_output = _get_image_features_onnx(pixel_values)
+        # Test parity at multiple image sizes
+        test_sizes = [(448, 448), (224, 448), (196, 392)]
+        for h, w in test_sizes:
+            pv = torch.randn(1, 3, h, w, dtype=torch.float32)
+            with torch.no_grad():
+                onnx_output = onnx_program(pv)
+                pytorch_output = _get_image_features_onnx(pv)
 
-        torch.testing.assert_close(
-            tuple(onnx_output),
-            (pytorch_output,),
-            atol=0.01,
-            rtol=0.01,
-            equal_nan=True,
-            check_device=False,
-        )
+            torch.testing.assert_close(
+                tuple(onnx_output),
+                (pytorch_output,),
+                atol=0.01,
+                rtol=0.01,
+                equal_nan=True,
+                check_device=False,
+                msg=f"Parity failed for {h}x{w}",
+            )
 
 
 if __name__ == "__main__":
